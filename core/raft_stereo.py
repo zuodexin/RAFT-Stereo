@@ -6,6 +6,7 @@ from core.extractor import BasicEncoder, MultiBasicEncoder, ResidualBlock
 from core.corr import CorrBlock1D, PytorchAlternateCorrBlock1D, CorrBlockFast1D, AlternateCorrBlock
 from core.utils.utils import coords_grid, upflow8
 
+import ipdb
 
 try:
     autocast = torch.cuda.amp.autocast

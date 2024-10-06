@@ -1,0 +1,7 @@
+datasets
+demo_output
+models
+*/__pycache__/*
+*/.ipynb_checkpoints/*
+*/.vscode/*
+*/.pytest_cache/*
