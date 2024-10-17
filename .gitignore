@@ -6,3 +6,4 @@ models
 */.vscode/*
 */.pytest_cache/*
 *.pyc
+.env
