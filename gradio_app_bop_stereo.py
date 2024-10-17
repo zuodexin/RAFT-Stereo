@@ -10,7 +10,6 @@ import ipdb
 import fire
 import random
 import os
-import open3d as o3d
 import plotly.graph_objs as go
 import torch.nn.functional as F
 
@@ -24,6 +23,14 @@ import torch
 from easydict import EasyDict as edict
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+from sam.mask_generator import (
+    load_sam,
+    load_sam_mask_generator,
+    CustomSamAutomaticMaskGenerator,
+    visualize_sam_results,
+)
+from custom_dinov2.pca import dinov2_pca
+from custom_dinov2.feature_extractor import CustomFeatureExtractor
 
 from raft_stereo import RAFTStereo
 from utils.utils import InputPadder
@@ -98,6 +105,45 @@ def apply_disparity(img, disp):  # gets a warped output
     )
 
     return output
+
+
+def instance_level_stereo(sam, dinov2, left_image, right_image):
+    pil_left_image = left_image.convert("RGB")
+    pil_right_image = right_image.convert("RGB")
+    left_image = np.array(pil_left_image).astype(np.uint8)
+    right_image = np.array(pil_right_image).astype(np.uint8)
+
+    left_ouput = sam.generate_masks(left_image)
+    right_output = sam.generate_masks(right_image)
+
+    vis_func = partial(visualize_sam_results, vis_boxes=False)
+    left_seg_vis = Image.fromarray(vis_func(left_image, left_ouput))
+    right_seg_vis = Image.fromarray(vis_func(right_image, right_output))
+
+    # dinov2
+    left_feature = dinov2.extract_features(pil_left_image)
+    right_feature = dinov2.extract_features(pil_right_image)
+
+    left_feature_vis = Image.fromarray(
+        (
+            dinov2_pca(left_feature.unsqueeze(0).cpu())
+            .squeeze(0)
+            .permute(1, 2, 0)
+            .numpy()
+            * 255
+        ).astype(np.uint8)
+    )
+    right_feature_vis = Image.fromarray(
+        (
+            dinov2_pca(right_feature.unsqueeze(0).cpu())
+            .squeeze(0)
+            .permute(1, 2, 0)
+            .numpy()
+            * 255
+        ).astype(np.uint8)
+    )
+
+    return left_seg_vis, right_seg_vis, left_feature_vis, right_feature_vis
 
 
 def predict(model, camera_cfg, left_image, right_image, iters=32):
@@ -232,6 +278,35 @@ def raft_stereo_init():
     return model.eval()
 
 
+def sam_init():
+
+    args = edict(
+        model_type="vit_l",
+        checkpoint_dir="models/sam",
+        device="cuda",
+    )
+
+    sam = load_sam(args.model_type, args.checkpoint_dir, args.device)
+    mask_generator = load_sam_mask_generator(
+        args.model_type, args.checkpoint_dir, args.device
+    )
+    custom_mask_generator = CustomSamAutomaticMaskGenerator(
+        sam,
+        mask_generator.min_mask_region_area,
+        mask_generator.points_per_batch,
+        mask_generator.stability_score_thresh,
+        mask_generator.box_nms_thresh,
+        mask_generator.crop_overlap_ratio,
+        segmentor_width_size=512,
+    )
+    return custom_mask_generator
+
+
+def dinov2_init():
+    dinov2 = CustomFeatureExtractor().cuda()
+    return dinov2
+
+
 def load_bop_examples(dataset_root, split, split_type=None, num_examples=5):
 
     scene_folder = f"{dataset_root}/{split}_{split_type}"
@@ -264,7 +339,14 @@ def run_demo():
         split_type="ensenso",
         num_examples=30,
     )
+    print("loading RAFT Stereo...")
     raft_stereo_model = raft_stereo_init()
+
+    print("loading SAM...")
+    sam = sam_init()
+    print("loading DINOv2...")
+    dinov2 = dinov2_init()
+
     with gr.Blocks(title=_TITLE, theme=custom_theme, css=custom_css) as demo:
         with gr.Row():
             with gr.Column(scale=1):
@@ -275,25 +357,96 @@ def run_demo():
                 left_image = gr.Image(
                     type="pil",
                     label="Left Image",
-                    # interactive=False,
+                    # interactive=True,
                     height=320,
                     image_mode="RGB",
                     elem_id="left_image",
-                    visible=True,
+                    # visible=True,
                 )
             with gr.Column(scale=1):
                 right_image = gr.Image(
                     type="pil",
                     label="Right Image",
-                    # interactive=False,
+                    interactive=True,
                     height=320,
                     image_mode="RGB",
                     elem_id="right_image",
-                    visible=True,
+                    # visible=True,
                 )
         with gr.Row():
             with gr.Column(scale=1):
-                submit_btn = gr.Button("Submit", variant="primary", interactive=True)
+                instance_stereo_btn = gr.Button(
+                    "Instance-level Stereo", variant="primary", interactive=True
+                )
+
+        # seg
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown("## Left Segmentation")
+                out_left_seg = gr.Image(
+                    type="pil",
+                    label="SAM",
+                    interactive=False,
+                    height=320,
+                    image_mode="RGB",
+                    elem_id="output_image",
+                    visible=True,
+                )
+            with gr.Column(scale=1):
+                gr.Markdown("## Right Segmentation")
+                out_right_seg = gr.Image(
+                    type="pil",
+                    label="SAM",
+                    interactive=False,
+                    height=320,
+                    image_mode="RGB",
+                    elem_id="warped_right",
+                    visible=True,
+                )
+
+        # feature
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown("## Left Feature")
+                left_feat_image = gr.Image(
+                    type="pil",
+                    label="DINOv2",
+                    interactive=False,
+                    height=320,
+                    image_mode="RGB",
+                    elem_id="output_image",
+                    visible=True,
+                )
+            with gr.Column(scale=1):
+                gr.Markdown("## Right Feature")
+                right_feat_image = gr.Image(
+                    type="pil",
+                    label="DINOv2",
+                    interactive=False,
+                    height=320,
+                    image_mode="RGB",
+                    elem_id="warped_right",
+                    visible=True,
+                )
+
+        # matching
+        instance_stereo_btn.click(
+            fn=partial(instance_level_stereo, sam, dinov2),
+            inputs=[left_image, right_image],
+            outputs=[
+                out_left_seg,
+                out_right_seg,
+                left_feat_image,
+                right_feat_image,
+            ],
+            queue=True,
+        )
+
+        with gr.Row():
+            with gr.Column(scale=1):
+                raft_stereo_btn = gr.Button(
+                    "Run Raft-Stereo", variant="primary", interactive=True
+                )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -344,7 +497,7 @@ def run_demo():
                     examples_per_page=5,
                 )
 
-        submit_btn.click(
+        raft_stereo_btn.click(
             fn=partial(predict, raft_stereo_model, camera_cfg),
             inputs=[left_image, right_image],
             outputs=[out_disp_image, out_mixup, out_depth_image, pc_plot],

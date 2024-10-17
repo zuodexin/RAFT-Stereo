@@ -17,3 +17,8 @@ dependencies:
   - imageio
   - scikit-image
   - p7zip
+  - ipdb
+  - fire
+  - gradio
+  - plotly
+  - easydict
